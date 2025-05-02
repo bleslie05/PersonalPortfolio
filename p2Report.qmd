@@ -1,0 +1,565 @@
+---
+title: "Project 2 Report | Stock Trends"
+subtitle: "DSC-260-A"
+author: "Brandon Leslie"
+format: pdf
+editor: visual
+---
+
+```{r include = FALSE}
+library(tidyverse)
+library(tidymodels)
+library(quantmod)
+library(tidyquant)
+library(knitr)
+library(forecast)
+library(quantmod)
+library(patchwork)
+library(scales)
+library(lubridate) 
+source("p2Functions.R")
+
+```
+
+```{r setup, include = FALSE}
+opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      fig.width = 10,
+                      fig.height = 10
+                      )
+```
+
+# Introduction
+
+This project explores historical stock trends from a selection of notable companies across various market sectors. This includes technology, healthcare, & consumer goods. Using data collected from the **yfinance** API, this report analyzes daily price metrics- such as opening, closing, volume, high, and low for each sticker selected. The objective is to identify patterns, compare stock performance, and observe any notable movements that may relate to market behavior or economic events.
+
+# Data Tidying
+
+The data pulled from the yfinance API call is objectively messy. The metrics are all spread out in the first row (Open, volume, High, close, etc.), and there is a different column for each stock by metric. It is important to note that all these columns are numbered. ex: ZSPC...2, WMT...28, etc.
+
+```{python include = FALSE}
+import yfinance as yf
+from datetime import datetime
+import pandas as pd
+
+
+# Ticker & Metric list
+tickers = ['NVDA', 'COST', 'AMZN', 'INLF', 'WMT', 'JNJ', 'UNH', 'ZSPC']
+#metrics = ['_Close', '_Open', '_Low', '_High', '_Volume']
+
+#Uses most Recent Date
+end_date = datetime.today().strftime('%Y-%m-%d')
+
+#Downloading tickr history from yahoo finance (yf)
+data = yf.download(tickers, end=end_date, interval='1d', group_by='ticker')
+
+#downloading raw data
+data.to_csv('unclean_stocks.csv')
+
+
+#flattening column multi-index
+data.columns = [f"{metric}_{ticker}" for metric, ticker in data.columns]
+
+#date becomes a regular column
+data = data.reset_index()
+
+# Pivoting data into longer format (like pivot_longer() in R)
+data = data.melt(id_vars="Date", var_name="Metric_Ticker", value_name="Price")
+
+#Splitting columns with expand=TRUE and str.split()
+data[['Ticker', 'Metric']] = data['Metric_Ticker'].str.split('_', expand=True)
+
+#Dropping the original combined column
+data = data.drop(columns='Metric_Ticker')
+
+#expansion of metrics for visulization
+data = data.pivot(index=["Date", "Ticker"], columns="Metric", values="Price").reset_index()
+
+#R data
+data.to_csv('stocks.csv', index=False)
+
+```
+
+```{r}
+#Loading in data from directory
+stocks <- read_csv("~/PycharmProjects/Project2_DSC260/stocks.csv")
+tickers <- unique(stocks$Ticker)
+metrics <- unique(stocks$Metric)
+raw <- read_csv("~/PycharmProjects/Project2_DSC260/unclean_stocks.csv")
+```
+
+```{r}
+head(raw)
+```
+
+The python code used to tidy this data downloads daily stock data for eight selected tickers using the yfinance API. It flattens the multi-level column structure, reshapes the data into long format with separate columns for date, metric (e.g., Open, Close), and ticker symbol. The dataset is then pushed to the current working directory, and can be pulled using the 'read_csv()," function in R. Lastly (Done with R code), three new columns are created. One for market volatility, another for market-cap, and the last one as a sector classification.
+
+```{r}
+stocks <- stocks %>%
+  group_by(Ticker) %>%
+  mutate(Returns = (Close - lag(Close)) / lag(Close),
+         Volatility = sd(Returns, na.rm = TRUE))
+stock_info <- tibble(
+  Ticker = c('NVDA', 'COST', 'AMZN', 'INLF', 'WMT', 'JNJ', 'UNH', 'ZSPC'),
+  Sector = c('Technology', 'Consumer Defensive', 'Technology', 'IPO', 
+             'Consumer Defensive', 'Healthcare', 'Healthcare', 'IPO'),
+  Market_Cap = c('Large', 'Large', 'Large', 'Small', 'Large', 'Large', 'Large', 'Small')
+)
+
+stocks <- stocks %>% left_join(stock_info, by = "Ticker")
+
+
+Timeframes <- list(
+  Dotcom = c("1999-01-01", "2001-12-31"),
+  Covid = c("2019-01-01", "2022-12-31"),
+  SVB = c("2023-03-01", "2023-04-30"),
+  HM = c("2007-01-01", "2009-12-31"),
+  BlackMonday = c("1987-10-01", "1987-12-31")
+)
+
+```
+
+# Variables
+
+-   **Open**
+
+    -   Price of a stock at the opening of a market
+
+-   **Close**
+
+    -   Price of a stock at the close of a market
+
+-   **Volume**
+
+    -   Amount of specified stock traded in that market day
+
+-   **High**
+
+    -   Highest Price during the Market Day
+
+-   **Low**
+
+    -   Lowest Price during the market Day
+
+-   **Returns**
+
+    -   Daily percentage change in the price of a stock
+
+-   **Volatility**
+
+    -   Standard Deviation of returns, measures how drastic a stock changes base d on the daily percentage change.
+
+-   **Sector**
+
+    -   Type of Sector each stock is in (excluding IPO's)
+
+-   **Market_Cap**
+
+    -   Total Value of a Comapnies outstanding shares of stock (How much \$ in their stocks make up their respective market)
+
+# Modeling/Visualization Concepts
+
+In my modeling functions, I incorporated several advanced techniques beyond what we've been practicing in DSC-260. I used the **tidyquant** package, which specializes in financial data visualization, to enhance how stock movements are displayed. I also went ahead in the **forecasting** packages by utilizing Neural Networking concepts.
+
+-   **LovelyCandle() Function**
+
+    -   Utilizes the **geom_candlestick()** function to show mid-short term trading trends.
+
+    -   Uses **geom_bbands()** to show volatility, using a Simple Moving Average over 20 days with the Bollinger Bands having a width of 2 standard deviations from the Average.
+
+    -   Also utilizes the patchwork() package to piece together a volume bar plot, which helps show trader activity throughout the time period.
+
+    -   Various aesthetic functions to make these visualizations smoother, incorporates themes & scales for clarity.
+
+    -   Great for shorter time frames, helpful when trying to make a regular stop loss, or trailing stop loss/limit order.
+
+-   **LovelyStep() Function**
+
+    -   Utilizes the **geom_step()** to show basic stock movement, and historical price data.
+
+    -   Uses two **geom_ma()'s (moving average functions)** to help show shorter cyclical trends vs longer ones. The blue line is the 50 day ma , while the Red is the 200 day one.
+
+    -   Uses aesthetic functions as-well, and Volume plot is copied for reference.
+
+    -   Doesn't really show cyclical trends that much, more for historical comparison rather then to draw present day conclusions from.
+
+    **LovelyNNAR Functions**
+
+-   **LovelyNNARModel()**
+
+    -   Utilizes Neural Network Auto Regression Models with Time Series to help "predict," stock prices.
+
+        -   Neutral Networks need lots of data in order to train Neural networks mimic how neurons work. It tries to learn patterns on data by mimicking the human brain.
+
+    -   Used to set the base model function for the Events in which I aim to look at.
+
+    -   Do to the chronological nature of this data, splitting a time series into normal test/training splits like with basic continuous/categorical will not work here.
+
+    -   In order to properly predict on this data, I used two methods:
+
+        -   **Expected**
+
+            -   Trains on data PREVIOUS to the specified event, excludes the event window, and makes a prediction of what that event "could have," been based off of previous historical data.
+
+            -   **Date \< range1**
+
+        -   **Predicted**
+
+            -   Trains using Data ONLY during the specified event. Excludes pre-event data. Tries to predict how that stock would have behaved based on that window.
+
+            -   **Date between range1**
+
+        -   Once time series are trained, predictions are made using the **forecast()** function
+
+        -   Data is then passed to ggplot, where I use four graphing concepts.
+
+            -   geom_line() to visualize the predicted close (Red), vs the expected close (Blue).
+
+            -   geom_ribbon() to show a "damage," window. (Difference between expected vs actual)
+
+            -   geom_step() to show actual close, there for reference.
+
+    -   **LovelyEvent()**
+
+        -   Bridge between my modeling & faceted plotting function
+
+        -   Uses simple if logic and range selection, not purrr::map() or iteration
+
+        -   Uses stop() condition if the input string isn't found in the predefined list.
+
+        -   Could be replicated in Python, but R and Python don't share memory environments natively (unlike HTML and JavaScript that can interact directly).
+
+    -   **LovelyMultiNNARModel()**
+
+        -   Facets all stocks together for events based on if they have enough historical data to render (not great with IPO's)
+
+        -   Uses map() to build a list of path worked plots
+
+        -   Uses multiple if-return statements to filter out data that isn't cohesive to what I'm trying to accomplish.
+
+        -   Largely used because IPO's ruined this part of the modeling, IPO's don't have much history for neural networks to train on. (80 observations vs thousands from other reputable companies).
+
+        -   Wrap plots & creates themes at the end.
+
+    -   **Brandish() Function**
+
+        -   Overview on selected stock, provides latest close price.
+
+Overall, the combination of candlestick charts, moving averages, Bollinger Bands, and NNAR models helps capture both short-term volatility and long-term stock performance patterns in a structured, technical analysis style.
+
+# Initial Public Offerings
+
+Both ZSPC and INLF are recent initial public offerings (IPOs). Companies use IPOs to raise capital by transitioning from private to public ownership, often with the help of an underwriter and regulatory filings like those with the SEC. These two IPOs, both under a year old, offer insight into early-stage market behavior. IPO stocks are typically highly volatile, making them important indicators during periods of market uncertainty. Although IPOs are not a specific sector, their volatility makes them a interesting category to watch.
+
+```{r}
+# Today's date
+today <- Sys.Date()
+
+# 1 year ago (For Candlestick/B Bands visualizations)
+one_year_ago <- today %m-% months(12)
+
+ipo_start <- as.Date("2024-12-01")
+
+#Ticker List
+ tikrs = c("AMZN", "NVDA", "COST", "WMT", "JNJ", "UNH", "ZSPC", "INLF")
+```
+
+## ZSPC
+
+ZSpace is a company that specializes in augmented reality to assist in training/education. They have gone public as of December of 2024, and had an initial listing of \$5 per share. The trading volume of ZSpace exceeded around 2.5 million shares, indicating strong investor interest. It is also important to note that ZSpace net's roughly 2/3rds of it is overall revenue! This is excellent, considering how common it is for companies within their infancy stages to attain a negative net income.
+
+```{r}
+LovelyCandle(tikr = 'ZSPC', 
+             tx = 'ZSpace - Candlestick View', 
+             sbtx = 'IPO | Augmented Reality Sector', 
+             bks = '3 months', 
+             range1 = ipo_start, 
+             range2 = today)
+
+LovelyStep(tikr = 'ZSPC', 
+           tx = 'ZSpace - Step Line View', 
+           sbtx = 'IPO | Augmented Reality Sector', 
+           bks = '3 months',
+           range2 = today)
+Brandish('ZSPC')
+```
+
+There doesn't seem to be too much volatility with the price of ZSPC. While it is relatively new, there is a sudden price drop following a peak. However this peak is around the time where new tariffs on some of our major importers were implemented, which has affected multiple stocks industry wide, and not just ZSPC. However, do to it being an IPO, IPO's are more then likely the first to go when market volatility hits.
+
+There isn't enough data to draw conclusions from the geom_step() graph as there isn't enough history to see a solid 50-200 SMA. However, from pre tariffs, you can kind of see a drop & rise pattern, so I would say ZSPC has a promising future, especially for the sector that they're in.
+
+## INLF
+
+INLIF Ltd., NASDAQ: INLF, is a Cayman Islands-incorporated parent firm operating through a Chinese subsidiary to design, produce, and sell manipulator arms made specifically for injection molding machine branded as INLIF (因立夫). It earns its revenue through direct sales of manipulator arms, accessories, raw materials, and installation services. INLIF has 117 customers as of 2023, who are machine producers as well as industrial automation firms. It raised 8 million in its December 2024 Initial Public Offering by selling a share at \$4.00, listing on NASDAQ.
+
+```{r}
+LovelyCandle(tikr = 'INLF', 
+             tx = 'Innovative Life Sciences (INLF) - Candlestick View', 
+             sbtx = 'IPO | Biotech Sector', 
+             bks = '3 months', 
+             range1 = ipo_start, 
+             range2 = today)
+
+LovelyStep(tikr = 'INLF', 
+           tx = 'Innovative Life Sciences (INLF) - Step Line View', 
+           sbtx = 'IPO | Biotech Sector', 
+           bks = '3 months',
+           range2 = today)
+Brandish('INLF')
+```
+
+INLF seems to have major market volatility, and has exceeded its Bollinger Band diameter, and had a major drop immediately after. It then dropped below it is initial price, and the stock began to teeter the line of becoming a penny stock or not. While INLF isn't a Chinese based company (Caymen Islands), much of their business practices are regulated by Chinese law, and influenced by the Chinese market. Foreign markets of non European origin (or just emerging markets), face significant volatility, especially during tariffs and/or sanctions. When stocks have a relatively cheap price, they become more susceptible to market manipulation. This makes investors anxious, holding off long-term, serious investment.
+
+# Technology
+
+**AMZN** & **NVDA** are both considered Blue Chip stocks. The term "Blue chip," is originally taken from poker, where the blue chips are the highest in value. Blue chip companies are known for stability, strong fundamentals, and low volatility. While they are both apart of the broad technology sector, they cn be regarded as Blue Chip aswell.
+
+## NVDA
+
+NVIDIA Corporation (NVDA) is a global graphics processing unit (GPU) technology market leader that started with gaming GPUs dominance and extending its serious commitments to AI, deep learning, and autonomous car technology presently. NVIDIA is a holdings staple in most technology and general index portfolios.
+
+```{r}
+LovelyCandle(tikr = 'NVDA', 
+             tx = 'NVIDIA - Candlestick View', 
+             sbtx = 'Technology | Blue Chip', 
+             bks = '3 months', 
+             range1 = one_year_ago, 
+             range2 = today)
+
+LovelyStep(tikr = 'NVDA', 
+           tx = 'NVIDIA - Step Line View', 
+           sbtx = 'Technology | Blue Chip', 
+           bks = '5 years', 
+           range2 = today)
+Brandish('NVDA')
+```
+
+NVDA has seen significant growth, and has the most steepest incline to it is peak out of all the stocks in this report. Those who invested in NVDA when it was worth just mere dollars have made a great ROI (Return Of Investment). While NVDA can be considered a modern day blue-chip stock, it has seen some major fluctuations just from mere speculation of the future of computer processing, and some problems that it may face. Nevertheless, Nividia is probably one of the top preforming stocks in terms of return in the past century, and is highly sought after. I do think it is too early to consider NVDA a defensive type rather then just blue chip.
+
+Is is also important to note that NVDA exceeds it is volatile zone based on the LovelyCandelstick() function pretty often.
+
+## Amazon
+
+Amazon.com, Inc. (AMZN) is one of the world's largest e-commerce and cloud computing companies. Initially an online bookstore, Amazon has diversified into retail, media, cloud services (AWS), and artificial intelligence. The company's consistent innovation and market expansion make it a hallmark Blue Chip stock in the technology sector.
+
+```{r}
+LovelyCandle(tikr = 'AMZN', 
+             tx = 'Amazon - Candlestick View', 
+             sbtx = 'Technology | Blue Chip', 
+             bks = '3 months', 
+             range1 = one_year_ago, 
+             range2 = today)
+
+LovelyStep(tikr = 'AMZN', 
+           tx = 'Amazon - Step Line View', 
+           sbtx = 'Technology | Blue Chip', 
+           bks = '5 years', 
+           range2 = today)
+Brandish('AMZN')
+```
+
+Amazon rarely breaks the Bollinger bands, but when it does, the most drastic ones are seen as a quick up. From the historical graph, you can see a notable change in trend after COVID when retailers started to get more sales, however that difference was quickly made back up, roughly from 2022-2023 when mandates officially ended. There doesn't seem to be too much market volatility with Amazon currently, it just seems to be on a general downtrend.
+
+# Healthcare
+
+Healthcare refers to a broad industry encompassing pharmaceuticals, insurance, biotechnology, and clinical services. Healthcare companies tend to be more resilient during recessions, as demand for healthcare services is less sensitive to economic cycles.
+
+## United Healthcare
+
+UnitedHealth Group (UNH) is the largest healthcare insurance company in the United States. The company provides a wide range of health care products and insurance services, from employer and government benefit programs to direct medical services through its Optum subsidiary. UNH plays a critical role in both insurance and healthcare delivery sectors.
+
+```{r}
+LovelyCandle(tikr = 'UNH', 
+             tx = 'United Healthcare - Candlestick View', 
+             sbtx = 'Healthcare | Insurance Sector', 
+             bks = '3 months', 
+             range1 = one_year_ago, 
+             range2 = today)
+
+LovelyStep(tikr = 'UNH', 
+           tx = 'United Healthcare - Step Line View', 
+           sbtx = 'Healthcare | Insurance Sector', 
+           bks = '5 years', 
+           range2 = today)
+Brandish('UNH')
+```
+
+United health care seems to be doing fine currently. However, there was an incident back in December of 2024 when CEO Brian Thompson passed away in the streets of New York City. Right before this event, the candlestick graph oscillates from above & below the SMA line, then finally dropping. Post-incident timeframe shows us extreme volatility, with the Bollinger band range almost tripling in size from July of 2024.
+
+This effect can also be seen in the LovelyStep() function, where the price begins to show extreme volatility. I felt this stock was important to show due show how recent events can cause chaos in trading patterns, leading to irrational decisions by both retail investors, all the way to hedge-fund managers.
+
+## Johnson & Johnson
+
+Johnson & Johnson (JNJ) is a global healthcare conglomerate with operations spanning pharmaceuticals, medical devices, and consumer health products. With a history of stable earnings, reliable dividend payouts, and broad market diversification, JNJ remains a staple in defensive and healthcare investment strategies.
+
+```{r}
+
+LovelyCandle(tikr = 'JNJ', 
+             tx = 'Johnson & Johnson - Candlestick View', 
+             sbtx = 'Healthcare | Consumer Defensive', 
+             bks = '3 months', 
+             range1 = one_year_ago, 
+             range2 = today)
+
+LovelyStep(tikr = 'JNJ', 
+           tx = 'Johnson & Johnson - Step Line View', 
+           sbtx = 'Healthcare | Consumer Defensive', 
+           bks = '6 years', 
+           range2 = today)
+Brandish('JNJ')
+```
+
+Johnson & Johnson is one of the most stable companies in this report. Johnson & Johnson's fluctuations are mostly seen through product recalls or scares. An example of this is how it is seen a major drop in valuable to it is rejection of a settlement. This settlement is from lawsuits related to their talc-based products, specifically baby powder.
+
+# Consumer Defensive
+
+Consumer defensive stocks represent companies that provide essential goods, such as food, beverages, and household products. These companies typically maintain steady revenues regardless of broader economic cycles, offering stability during recessions and periods of market volatility.
+
+## Walmart
+
+Walmart Inc. (WMT) is the largest retailer in the world, known for its low prices and expansive product offerings. Walmart operates hypermarkets, discount department stores, and grocery stores globally. Its strong supply chain network and focus on essential goods make it a core defensive stock.
+
+```{r}
+LovelyCandle(tikr = 'WMT', 
+             tx = 'Walmart - Candlestick View', 
+             sbtx = 'Consumer Defensive | Retail', 
+             bks = '3 months', 
+             range1 = one_year_ago, 
+             range2 = today)
+
+LovelyStep(tikr = 'WMT', 
+           tx = 'Walmart - Step Line View', 
+           sbtx = 'Consumer Defensive | Retail', 
+           bks = '6 years', 
+           range2 = today)
+Brandish('WMT')
+```
+
+Walmart has demonstrated strong upward momentum from mid-2024 through early 2025, followed by a sharp correction and quick recovery. The stock typically trades within its Bollinger Bands, with occasional squeezes that indicate periods of low volatility. Overall, it reflects long-term bullish strength with short-term pullbacks.
+
+## Costco
+
+Costco Wholesale Corporation (COST) is a membership-based warehouse club that sells a wide variety of merchandise in bulk. Known for strong customer loyalty and efficient operations, Costco remains a dominant player in the retail space and a reliable performer during uncertain economic times.
+
+```{r}
+LovelyCandle(tikr = 'COST', 
+             tx = 'Costco - Candlestick View', 
+             sbtx = 'Consumer Defensive | Retail', 
+             bks = '3 months', 
+             range1 = one_year_ago, 
+             range2 = today)
+
+LovelyStep(tikr = 'COST', 
+           tx = 'Costco - Step Line View', 
+           sbtx = 'Consumer Defensive | Retail', 
+           bks = '6 years', 
+            
+           range2 = today)
+Brandish('COST')
+```
+
+Costco has maintained a strong long-term uptrend, with some short-term volatility. While prices peaked above \$1,100, the stock has since pulled back and entered a sideways consolidation phase. The Bollinger Bands have widened recently, indicating increased uncertainty. However, long-term moving averages remain supportive of Costco’s continued strength in the retail sector.
+
+# Historical Events (Past & Present)
+
+Many critical events whether past or present can play a huge role in market volatility. Market volatility is the gauge at which a stocks value can fluctuate. Low market volatility generally means that it is a safe & predictable time to buy, high market volatility means that it would be very wise to **HOLD**, your current shares, or shy back from buying new ones. There are a plethora of events that can alter the performance of a stock. Whether it is political discourse, the fluctuation of seasonal sales, or a scandal in a major holdings company, there are many scenarios that can help predict the stability of a stock. Below are 5 historical events within the past 50 years that show how **Regression Models** can help predict stock performance.
+
+## Black Monday (1987)
+
+On October 19, 1987, global stock markets crashed, with the Dow Jones falling 22.6% in one day. It remains the largest single-day percentage drop in history, triggered by program trading, panic selling, and market inefficiencies.
+
+```{r}
+LovelyMultiNNARModel(
+  event = "BlackMonday",
+  bks = "1 month",
+  euler = 1e-6
+)
+```
+
+There is a major gap between the expected & predicted lines, this means that blackmail caused a major deviation then what was expected based on previous historical trends. Also important to note the difference from the prices of today to those of the 1960s, and how value has changed over-time.
+
+## Dot com Bubble (2000)
+
+Between 1995 and 2000, excessive speculation in internet start ups created a tech stock bubble that burst in March 2000, wiping out trillions in market value and crashing the Nasdaq by nearly 78%.
+
+```{r}
+LovelyMultiNNARModel(
+  event = "Dotcom",
+  bks = "1 year",
+  euler = 1e-7
+)
+```
+
+The dotcom bubble showed varying market volatility. While healthcare relatively saw an uptrend, others like Amazon (AMZ) & Walmart (WMT) saw minimal deviation between their predicted and actual trend lines. What stands out, however, is Costco (COST). The expected line oscillates near the lower bound, while the expected shows major volatility. The actual line for COST also fluctuates heavily, suggesting it was especially vulnerable to market swings during that period. Interestingly, Costco’s average closing price today is over 30 times higher than its peak during the bubble, possibly reflecting improved risk management practices aimed at protecting major stakeholders.
+
+## Housing Market Crash (2007-2009)
+
+The 2007–2009 Housing Crash was triggered by risky mortgage lending and the collapse of financial institutions. Stock markets fell sharply, with consumer defensive companies showing more stability than sectors like finance and real estate.
+
+```{r}
+LovelyMultiNNARModel(
+  event = "HM",
+  bks = "1 year",
+  euler = 1e-6
+)
+```
+
+The housing market appeared to impact every company in the sample to some degree. Walmart (WMT) and Johnson & Johnson (JNJ) showed the most pronounced volatility, with wide swings in actual prices compared to expected & predicted prices. Interestingly, WMT's expected line closely followed the actual stck behavior, while its predicted under preformed. This is fascinating considering that models trained with just the event-window usually outperform rained solely on historical data. Other companies like United Healthcare (UNH) Amazon (AMZ), and Costco (COST) displayed less deviation between their predicted & actual lines, including no significate divergence in their expected lines either. This suggest that their forms already priced in the market crahs, or it was better absorbed.
+
+## Covid (2020 - 2022)
+
+The COVID-19 pandemic caused a 34% market crash in early 2020 Do to global shutdowns and economic uncertainty, but aggressive stimulus policies triggered a historic "V-shaped" recovery by August 2020.
+
+```{r}
+LovelyMultiNNARModel(
+  event = "Covid",
+  bks = "10 months",
+  euler = 1e-6
+)
+```
+
+Covid affected every company in this sample, however, the predicted lines greatly outperformed the expected ones. Online retailers like Walmart (WMT) & Amazon (AMZ) objectively benefited from the Covid shutdowns & regulations However other companies like Costco (COST) also saw an increase in price. Healthcare companies were the only one to see a major dip around January of 2020, but was quickly followed by recovery, with a fair uptrend.
+
+## SVB Collapse & Banking Crisis (March 2023)
+
+In March 2023, Silicon Valley Bank collapsed after massive customer withdrawals exposed vulnerabilities in the banking sector, sparking fears about liquidity risks and shaking regional banks.
+
+```{r}
+LovelyMultiNNARModel(
+  event = "SVB",
+  bks = "2 weeks",
+  euler = 1e-6
+)
+```
+
+The SVB seemed to have minimal immediate impact on most of the companies in this sample. However, the two healthcare stocks, Johnson & Johnson (JNJ) and UnitedHealth Group (UNH), experience a notable spike in the month following the event. This sugests a potential investor shift towards defensive sectors. Meanwhile, companies like Amazon (AMZ) & Nividia (NVDA) maintained relatively steady growth throughout the period. Showing resilience despite the broader financial disruption.
+
+# Conclusion
+
+## Recap
+
+This project aimed to explore historical stock trends using a mix of technical indicators, neural forecasting models, and sector-based comparisons. By integrating data from the yfinance API and visualizing patterns through R, the analysis focused on identifying both short-term volatility and long-term performance signals across key market sectors.
+
+## Key Observations
+
+Blue chip technology stocks like Amazon and NVIDIA posted healthy past performance with frequent Bollinger Band breaks—characteristic of speculative activity and high post-pandemic growth. Defensive consumer stocks like Costco and Walmart were stronger in price action with tightening band action and following long-term moving averages closely.
+
+ZSPC and INLF IPOs exhibited initial volatility and abnormal patterns of volumes in replicating the risks of low-float stocks. Healthcare shares remained robust with near-term event-driven disruption in the face of leadership transition at UnitedHealth.
+
+## Modeling Effectiveness
+
+The collaboration of multiple visualizations, as well as SMA overlays, as well as NNAR-based event modeling provided a multifaceted view of the behavior of each stock. Neural forecasts were particularly useful in quantifying event influenced impact, while traditional indicators like SMA and Bollinger Bands helped surface patterns in both momentum and volatility.
+
+## Final Thoughts
+
+This project illustrated how structured modeling & visualization can help investors & analysts decode complex market behavior. With increased market trublence, epsecially surrounding IPO's and other macro events, robust analytical frameworks are essential for informed decision making.
+
+## References
+
+### [Yahoo Finance](https://finance.yahoo.com/)
+### [IPO Scoop](https://www.iposcoop.com/)
+### [Tidy Quant](https://business-science.github.io/tidyquant/)
+### [Neural Network Models](https://otexts.com/fpp3/nnetar.html)
+
+
